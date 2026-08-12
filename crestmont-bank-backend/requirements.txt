@@ -1,0 +1,14 @@
+Django==5.0.7
+djangorestframework==3.15.2
+djangorestframework-simplejwt==5.3.1
+django-cors-headers==4.4.0
+psycopg2-binary==2.9.9
+django-otp==1.5.4
+qrcode==7.4.2
+django-anymail==11.1          # transactional email (verification, password reset)
+stripe==10.5.0
+python-decouple==3.8          # loads settings from .env
+django-filter==24.2
+dj-database-url==2.2.0        # parses Render's DATABASE_URL into Django's DATABASES format
+gunicorn==22.0.0
+whitenoise==6.7.0             # static files in production
