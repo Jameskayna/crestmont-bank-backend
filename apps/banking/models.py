@@ -47,6 +47,15 @@ class Account(models.Model):
         result = self.ledger_entries.filter(status="posted").aggregate(total=models.Sum("amount_cents"))
         return result["total"] or 0
 
+    def held_cents(self):
+        """Sum of pending (not yet posted) ledger entries — holds are negative amounts."""
+        result = self.ledger_entries.filter(status="pending").aggregate(total=models.Sum("amount_cents"))
+        return result["total"] or 0
+
+    def available_cents(self):
+        """Posted balance minus outstanding holds, e.g. a withdrawal awaiting Stripe confirmation."""
+        return self.balance_cents() + self.held_cents()
+
 
 class LedgerEntry(models.Model):
     """
@@ -129,6 +138,8 @@ class WithdrawalRequest(models.Model):
         SUCCEEDED = "succeeded", "Succeeded"
         REJECTED = "rejected", "Rejected"
         FAILED = "failed", "Failed"
+
+    AUTO_APPROVE_LIMIT_CENTS = 50_000  # $500 — above this, held for compliance review before Stripe is called
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     account = models.ForeignKey(Account, on_delete=models.PROTECT, related_name="withdrawal_requests")

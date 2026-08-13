@@ -108,6 +108,8 @@ REST_FRAMEWORK = {
         "auth": "10/min",       # login/register/reset attempts
         "otp": "5/min",         # 2FA code verification attempts
         "transfer": "20/min",
+        "deposit": "10/min",
+        "withdrawal": "10/min",
     },
     "DEFAULT_FILTER_BACKENDS": ("django_filters.rest_framework.DjangoFilterBackend",),
 }

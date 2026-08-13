@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Account, LedgerEntry, Transfer
+from .models import Account, DepositRequest, LedgerEntry, Transfer, WithdrawalRequest
 
 
 class AccountSerializer(serializers.ModelSerializer):
@@ -50,4 +50,33 @@ class TransferSerializer(serializers.ModelSerializer):
     class Meta:
         model = Transfer
         fields = ["id", "from_account", "to_account", "amount_cents", "note", "status", "created_at"]
+        read_only_fields = fields
+
+
+class DepositCreateSerializer(serializers.Serializer):
+    account = serializers.UUIDField()
+    amount_cents = serializers.IntegerField(min_value=100)  # $1 minimum
+
+
+class DepositSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DepositRequest
+        fields = ["id", "account", "amount_cents", "status", "created_at", "updated_at"]
+        read_only_fields = fields
+
+
+class WithdrawalCreateSerializer(serializers.Serializer):
+    account = serializers.UUIDField()
+    amount_cents = serializers.IntegerField(min_value=100)  # $1 minimum
+    destination_account_number = serializers.CharField(max_length=17)
+    destination_routing_number = serializers.CharField(max_length=9)
+
+
+class WithdrawalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = WithdrawalRequest
+        fields = [
+            "id", "account", "amount_cents", "destination_account_number",
+            "destination_routing_number", "status", "rejection_reason", "created_at", "updated_at",
+        ]
         read_only_fields = fields
