@@ -6,6 +6,7 @@ from django.db import models
 class AccountType(models.TextChoices):
     CHECKING = "checking", "Checking"
     SAVINGS = "savings", "Savings"
+    CREDIT = "credit", "Credit"
 
 
 class AccountStatus(models.TextChoices):
