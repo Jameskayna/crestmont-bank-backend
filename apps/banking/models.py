@@ -1,4 +1,5 @@
 import uuid
+from decouple import config
 from django.conf import settings
 from django.db import models
 
@@ -139,7 +140,10 @@ class WithdrawalRequest(models.Model):
         REJECTED = "rejected", "Rejected"
         FAILED = "failed", "Failed"
 
-    AUTO_APPROVE_LIMIT_CENTS = 50_000  # $500 — above this, held for compliance review before Stripe is called
+    # Above this, held for compliance review before Stripe is called. Same
+    # config()-from-.env pattern as other tunables in config/settings.py;
+    # defaults to $500 if WITHDRAWAL_AUTO_APPROVE_LIMIT_CENTS isn't set.
+    AUTO_APPROVE_LIMIT_CENTS = config("WITHDRAWAL_AUTO_APPROVE_LIMIT_CENTS", default=50_000, cast=int)
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     account = models.ForeignKey(Account, on_delete=models.PROTECT, related_name="withdrawal_requests")
