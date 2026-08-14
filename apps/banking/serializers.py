@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Account, DepositRequest, LedgerEntry, Transfer, WithdrawalRequest
+from .models import Account, DepositRequest, LedgerEntry, ManualAdjustment, Transfer, WithdrawalRequest
 
 
 class AccountSerializer(serializers.ModelSerializer):
@@ -78,5 +78,45 @@ class WithdrawalSerializer(serializers.ModelSerializer):
         fields = [
             "id", "account", "amount_cents", "destination_account_number",
             "destination_routing_number", "status", "rejection_reason", "created_at", "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class AdminWithdrawalSerializer(serializers.ModelSerializer):
+    account_name = serializers.CharField(source="account.name", read_only=True)
+    account_owner_email = serializers.CharField(source="account.owner.email", read_only=True)
+
+    class Meta:
+        model = WithdrawalRequest
+        fields = [
+            "id", "account", "account_name", "account_owner_email", "amount_cents",
+            "destination_account_number", "destination_routing_number",
+            "status", "rejection_reason", "created_at", "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class ManualAdjustmentCreateSerializer(serializers.Serializer):
+    account = serializers.UUIDField()
+    amount_cents = serializers.IntegerField()  # signed: positive = credit, negative = debit
+    reason = serializers.CharField(max_length=255)
+
+    def validate_amount_cents(self, value):
+        if value == 0:
+            raise serializers.ValidationError("Amount cannot be zero.")
+        return value
+
+
+class ManualAdjustmentSerializer(serializers.ModelSerializer):
+    account_name = serializers.CharField(source="account.name", read_only=True)
+    account_owner_email = serializers.CharField(source="account.owner.email", read_only=True)
+    requested_by_email = serializers.CharField(source="requested_by.email", read_only=True)
+    approved_by_email = serializers.CharField(source="approved_by.email", read_only=True, default=None)
+
+    class Meta:
+        model = ManualAdjustment
+        fields = [
+            "id", "account", "account_name", "account_owner_email", "amount_cents", "reason",
+            "requested_by_email", "approved_by_email", "status", "created_at", "resolved_at",
         ]
         read_only_fields = fields

@@ -1,21 +1,27 @@
 import stripe
 from django.db import transaction
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from apps.auditlog.utils import log_action
 from apps.notifications.models import Notification
+from apps.users.permissions import IsApprover
 
-from .models import Account, AccountStatus, DepositRequest, LedgerEntry, Transfer, WithdrawalRequest
+from .models import Account, AccountStatus, DepositRequest, LedgerEntry, ManualAdjustment, Transfer, WithdrawalRequest
 from .serializers import (
     AccountCreateSerializer,
     AccountSerializer,
+    AdminWithdrawalSerializer,
     DepositCreateSerializer,
     DepositSerializer,
     LedgerEntrySerializer,
+    ManualAdjustmentCreateSerializer,
+    ManualAdjustmentSerializer,
     TransferCreateSerializer,
     TransferSerializer,
     WithdrawalCreateSerializer,
@@ -369,3 +375,241 @@ class StripeWebhookView(APIView):
                 )
 
             withdrawal.save(update_fields=["status"])
+
+
+class AdminAccountFreezeView(APIView):
+    """Freezing an account blocks money movement — distinct from blocking
+    a user's login, which is a separate action on the User model."""
+
+    permission_classes = [IsApprover]
+
+    def post(self, request, pk):
+        account = get_object_or_404(Account, pk=pk)
+        reason = request.data.get("reason", "")
+        if not reason:
+            return Response({"error": "A reason is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        account.status = AccountStatus.FROZEN
+        account.save(update_fields=["status"])
+        Notification.objects.create(
+            user=account.owner,
+            category=Notification.Category.SECURITY,
+            title="Account frozen",
+            body=f"{account.name} has been frozen: {reason}",
+        )
+        log_action(request, "account.freeze", "Account", account.id, reason=reason)
+        return Response(AccountSerializer(account).data)
+
+
+class AdminAccountUnfreezeView(APIView):
+    permission_classes = [IsApprover]
+
+    def post(self, request, pk):
+        account = get_object_or_404(Account, pk=pk)
+        account.status = AccountStatus.ACTIVE
+        account.save(update_fields=["status"])
+        log_action(request, "account.unfreeze", "Account", account.id)
+        return Response(AccountSerializer(account).data)
+
+
+class AdminAdjustmentListCreateView(APIView):
+    """The 'Fund/Debit' flow — the only sanctioned way to move money by
+    hand. Requests at or under ManualAdjustment.AUTO_APPROVE_LIMIT_CENTS
+    post immediately; anything larger sits PENDING_APPROVAL for a second
+    approver (never the same staff member who requested it)."""
+
+    permission_classes = [IsApprover]
+
+    def get(self, request):
+        adjustments = ManualAdjustment.objects.select_related(
+            "account", "account__owner", "requested_by", "approved_by"
+        ).order_by("-created_at")[:200]
+        return Response(ManualAdjustmentSerializer(adjustments, many=True).data)
+
+    def post(self, request):
+        serializer = ManualAdjustmentCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        account = get_object_or_404(Account, pk=data["account"])
+        amount = data["amount_cents"]
+        auto_approved = abs(amount) <= ManualAdjustment.AUTO_APPROVE_LIMIT_CENTS
+
+        with transaction.atomic():
+            adjustment = ManualAdjustment.objects.create(
+                account=account,
+                amount_cents=amount,
+                reason=data["reason"],
+                requested_by=request.user,
+                approved_by=request.user if auto_approved else None,
+                status=ManualAdjustment.Status.POSTED if auto_approved else ManualAdjustment.Status.PENDING_APPROVAL,
+                resolved_at=timezone.now() if auto_approved else None,
+            )
+            if auto_approved:
+                LedgerEntry.objects.create(
+                    account=account,
+                    amount_cents=amount,
+                    description=f"Manual adjustment: {data['reason']}",
+                    status=LedgerEntry.Status.POSTED,
+                    source_type=LedgerEntry.SourceType.MANUAL_ADJUSTMENT,
+                    source_id=adjustment.id,
+                )
+                Notification.objects.create(
+                    user=account.owner,
+                    category=Notification.Category.TRANSACTION,
+                    title="Account adjustment posted",
+                    body=f"{account.name} was adjusted: {data['reason']}",
+                )
+            log_action(
+                request,
+                "adjustment.request" if not auto_approved else "adjustment.auto_post",
+                "Account",
+                account.id,
+                reason=data["reason"],
+                metadata={"amount_cents": amount, "adjustment_id": str(adjustment.id)},
+            )
+
+        return Response(ManualAdjustmentSerializer(adjustment).data, status=status.HTTP_201_CREATED)
+
+
+class AdminAdjustmentApproveView(APIView):
+    permission_classes = [IsApprover]
+
+    def post(self, request, pk):
+        adjustment = get_object_or_404(ManualAdjustment, pk=pk)
+        if adjustment.status != ManualAdjustment.Status.PENDING_APPROVAL:
+            return Response({"error": "This adjustment is not pending approval."}, status=status.HTTP_400_BAD_REQUEST)
+        if adjustment.requested_by_id == request.user.id:
+            return Response({"error": "You cannot approve your own request."}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            adjustment.status = ManualAdjustment.Status.POSTED
+            adjustment.approved_by = request.user
+            adjustment.resolved_at = timezone.now()
+            adjustment.save(update_fields=["status", "approved_by", "resolved_at"])
+            LedgerEntry.objects.create(
+                account=adjustment.account,
+                amount_cents=adjustment.amount_cents,
+                description=f"Manual adjustment: {adjustment.reason}",
+                status=LedgerEntry.Status.POSTED,
+                source_type=LedgerEntry.SourceType.MANUAL_ADJUSTMENT,
+                source_id=adjustment.id,
+            )
+            Notification.objects.create(
+                user=adjustment.account.owner,
+                category=Notification.Category.TRANSACTION,
+                title="Account adjustment posted",
+                body=f"{adjustment.account.name} was adjusted: {adjustment.reason}",
+            )
+            log_action(
+                request, "adjustment.approve", "Account", adjustment.account_id,
+                reason=adjustment.reason, metadata={"adjustment_id": str(adjustment.id)},
+            )
+
+        return Response(ManualAdjustmentSerializer(adjustment).data)
+
+
+class AdminAdjustmentRejectView(APIView):
+    permission_classes = [IsApprover]
+
+    def post(self, request, pk):
+        adjustment = get_object_or_404(ManualAdjustment, pk=pk)
+        if adjustment.status != ManualAdjustment.Status.PENDING_APPROVAL:
+            return Response({"error": "This adjustment is not pending approval."}, status=status.HTTP_400_BAD_REQUEST)
+        reason = request.data.get("reason", "")
+        if not reason:
+            return Response({"error": "A reason is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        adjustment.status = ManualAdjustment.Status.REJECTED
+        adjustment.approved_by = request.user
+        adjustment.resolved_at = timezone.now()
+        adjustment.save(update_fields=["status", "approved_by", "resolved_at"])
+        # No rejection_reason field on this model — the audit log entry is
+        # the durable record of why, matching AuditLog's stated purpose.
+        log_action(
+            request, "adjustment.reject", "Account", adjustment.account_id,
+            reason=reason, metadata={"adjustment_id": str(adjustment.id)},
+        )
+        return Response(ManualAdjustmentSerializer(adjustment).data)
+
+
+class AdminWithdrawalListView(APIView):
+    """The withdrawal half of the Transactions authorize/decline queue —
+    only ever shows amounts above WithdrawalRequest.AUTO_APPROVE_LIMIT_CENTS,
+    since anything at or under that already auto-processed in Stage 4."""
+
+    permission_classes = [IsApprover]
+
+    def get(self, request):
+        withdrawals = WithdrawalRequest.objects.filter(
+            status=WithdrawalRequest.Status.PENDING
+        ).select_related("account", "account__owner").order_by("created_at")
+        return Response(AdminWithdrawalSerializer(withdrawals, many=True).data)
+
+
+class AdminWithdrawalApproveView(APIView):
+    permission_classes = [IsApprover]
+
+    def post(self, request, pk):
+        withdrawal = get_object_or_404(WithdrawalRequest, pk=pk, status=WithdrawalRequest.Status.PENDING)
+        withdrawal.status = WithdrawalRequest.Status.APPROVED
+        withdrawal.reviewed_by = request.user
+        withdrawal.save(update_fields=["status", "reviewed_by"])
+
+        try:
+            payout = create_withdrawal_payout(
+                amount_cents=withdrawal.amount_cents,
+                currency=withdrawal.account.currency,
+                withdrawal_request_id=withdrawal.id,
+                account_id=withdrawal.account_id,
+            )
+        except stripe.error.StripeError:
+            withdrawal.status = WithdrawalRequest.Status.FAILED
+            withdrawal.save(update_fields=["status"])
+            LedgerEntry.objects.filter(
+                source_type=LedgerEntry.SourceType.WITHDRAWAL, source_id=withdrawal.id
+            ).update(status=LedgerEntry.Status.FAILED)
+            log_action(request, "withdrawal.approve_failed", "WithdrawalRequest", withdrawal.id)
+            return Response(
+                {"error": "Could not start the withdrawal payout."}, status=status.HTTP_502_BAD_GATEWAY
+            )
+
+        withdrawal.stripe_payout_id = payout.id
+        withdrawal.status = WithdrawalRequest.Status.PROCESSING
+        withdrawal.save(update_fields=["stripe_payout_id", "status"])
+        log_action(
+            request, "withdrawal.approve", "WithdrawalRequest", withdrawal.id,
+            metadata={"amount_cents": withdrawal.amount_cents},
+        )
+        return Response(AdminWithdrawalSerializer(withdrawal).data)
+
+
+class AdminWithdrawalRejectView(APIView):
+    permission_classes = [IsApprover]
+
+    def post(self, request, pk):
+        withdrawal = get_object_or_404(WithdrawalRequest, pk=pk, status=WithdrawalRequest.Status.PENDING)
+        reason = request.data.get("reason", "")
+        if not reason:
+            return Response({"error": "A reason is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            withdrawal.status = WithdrawalRequest.Status.REJECTED
+            withdrawal.reviewed_by = request.user
+            withdrawal.rejection_reason = reason
+            withdrawal.save(update_fields=["status", "reviewed_by", "rejection_reason"])
+            # Releases the hold: the pending debit no longer counts against
+            # held_cents(), so the funds are available again.
+            LedgerEntry.objects.filter(
+                source_type=LedgerEntry.SourceType.WITHDRAWAL,
+                source_id=withdrawal.id,
+                status=LedgerEntry.Status.PENDING,
+            ).update(status=LedgerEntry.Status.FAILED)
+            Notification.objects.create(
+                user=withdrawal.account.owner,
+                category=Notification.Category.TRANSACTION,
+                title="Withdrawal declined",
+                body=reason,
+            )
+            log_action(request, "withdrawal.reject", "WithdrawalRequest", withdrawal.id, reason=reason)
+
+        return Response(AdminWithdrawalSerializer(withdrawal).data)

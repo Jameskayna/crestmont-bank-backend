@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django_otp.plugins.otp_totp.models import TOTPDevice
 from rest_framework import status
@@ -6,9 +7,13 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
+from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from apps.auditlog.utils import log_action
+
 from .models import EmailVerificationToken, PasswordResetToken
+from .permissions import IsApprover, IsStaff
 from .serializers import (
     LoginSerializer,
     PasswordResetConfirmSerializer,
@@ -217,3 +222,73 @@ class TwoFactorDisableView(APIView):
         request.user.is_2fa_enabled = False
         request.user.save(update_fields=["is_2fa_enabled"])
         return Response({"message": "Two-factor authentication disabled."})
+
+
+class AdminUserListView(APIView):
+    """Users & Accounts tab: search/list. Any staff role can view."""
+
+    permission_classes = [IsStaff]
+
+    def get(self, request):
+        qs = User.objects.all().order_by("-created_at")
+        search = request.query_params.get("search")
+        if search:
+            qs = qs.filter(email__icontains=search)
+        return Response(UserSerializer(qs[:100], many=True).data)
+
+
+class AdminUserDetailView(APIView):
+    """A user's own accounts and KYC documents, for the staff detail view —
+    avoids the frontend needing three separate round trips per user."""
+
+    permission_classes = [IsStaff]
+
+    def get(self, request, pk):
+        from apps.banking.models import Account
+        from apps.banking.serializers import AccountSerializer
+        from apps.kyc.models import KYCDocument
+        from apps.kyc.serializers import KYCDocumentSerializer
+
+        user = get_object_or_404(User, pk=pk)
+        data = UserSerializer(user).data
+        data["accounts"] = AccountSerializer(Account.objects.filter(owner=user), many=True).data
+        data["kyc_documents"] = KYCDocumentSerializer(
+            KYCDocument.objects.filter(user=user).order_by("-uploaded_at"), many=True
+        ).data
+        return Response(data)
+
+
+class AdminUserBlockView(APIView):
+    """'Block login' — distinct from freezing an account. Sets is_frozen
+    (checked at login) and blacklists every outstanding refresh token so
+    already-issued sessions can't silently keep working until they expire."""
+
+    permission_classes = [IsApprover]
+
+    def post(self, request, pk):
+        user = get_object_or_404(User, pk=pk)
+        reason = request.data.get("reason", "")
+        if not reason:
+            return Response({"error": "A reason is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.is_frozen = True
+        user.frozen_reason = reason
+        user.save(update_fields=["is_frozen", "frozen_reason"])
+
+        for token in OutstandingToken.objects.filter(user=user):
+            BlacklistedToken.objects.get_or_create(token=token)
+
+        log_action(request, "user.block_login", "User", user.id, reason=reason)
+        return Response(UserSerializer(user).data)
+
+
+class AdminUserUnblockView(APIView):
+    permission_classes = [IsApprover]
+
+    def post(self, request, pk):
+        user = get_object_or_404(User, pk=pk)
+        user.is_frozen = False
+        user.frozen_reason = ""
+        user.save(update_fields=["is_frozen", "frozen_reason"])
+        log_action(request, "user.unblock_login", "User", user.id)
+        return Response(UserSerializer(user).data)

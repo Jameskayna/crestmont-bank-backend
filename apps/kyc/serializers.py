@@ -24,3 +24,12 @@ class KYCDocumentSerializer(serializers.ModelSerializer):
         model = KYCDocument
         fields = ["id", "doc_type", "status", "rejection_reason", "uploaded_at", "reviewed_at"]
         read_only_fields = fields
+
+
+class AdminKYCDocumentSerializer(serializers.ModelSerializer):
+    user_email = serializers.CharField(source="user.email", read_only=True)
+
+    class Meta:
+        model = KYCDocument
+        fields = ["id", "user_email", "doc_type", "status", "rejection_reason", "uploaded_at", "reviewed_at"]
+        read_only_fields = fields
