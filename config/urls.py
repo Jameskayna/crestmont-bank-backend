@@ -13,7 +13,7 @@ urlpatterns = [
     path("auth/", include("apps.users.urls")),
     path("", include("apps.banking.urls")),  # accounts + transfers
     path("kyc/", include("apps.kyc.urls")),
-    path("notifications/", include("apps.notifications.urls")),
+    path("", include("apps.notifications.urls")),
     # Later stages will add:
     # path("loans/", include("apps.loans.urls")),
 ]
