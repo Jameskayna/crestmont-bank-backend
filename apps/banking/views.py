@@ -7,6 +7,8 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from apps.notifications.models import Notification
+
 from .models import Account, AccountStatus, DepositRequest, LedgerEntry, Transfer, WithdrawalRequest
 from .serializers import (
     AccountCreateSerializer,
@@ -109,6 +111,18 @@ class TransferCreateView(APIView):
                 status=LedgerEntry.Status.POSTED,
                 source_type=LedgerEntry.SourceType.TRANSFER,
                 source_id=transfer.id,
+            )
+            Notification.objects.create(
+                user=from_account.owner,
+                category=Notification.Category.TRANSACTION,
+                title="Transfer sent",
+                body=f"Sent from {from_account.name} to account •••• {to_account.account_number[-4:]}",
+            )
+            Notification.objects.create(
+                user=to_account.owner,
+                category=Notification.Category.TRANSACTION,
+                title="Transfer received",
+                body=f"Received into {to_account.name} from account •••• {from_account.account_number[-4:]}",
             )
 
         return Response(TransferSerializer(transfer).data, status=status.HTTP_201_CREATED)
@@ -298,6 +312,19 @@ class StripeWebhookView(APIView):
                     source_id=deposit.id,
                     provider_ref=payment_intent_id,
                 )
+                Notification.objects.create(
+                    user=deposit.account.owner,
+                    category=Notification.Category.TRANSACTION,
+                    title="Deposit completed",
+                    body=f"Your deposit to {deposit.account.name} has settled.",
+                )
+            else:
+                Notification.objects.create(
+                    user=deposit.account.owner,
+                    category=Notification.Category.TRANSACTION,
+                    title="Deposit failed",
+                    body=f"Your deposit to {deposit.account.name} could not be completed.",
+                )
 
     @staticmethod
     def _settle_withdrawal(payout_id, succeeded):
@@ -323,10 +350,22 @@ class StripeWebhookView(APIView):
                     hold.status = LedgerEntry.Status.POSTED
                     hold.provider_ref = payout_id
                     hold.save(update_fields=["status", "provider_ref"])
+                Notification.objects.create(
+                    user=withdrawal.account.owner,
+                    category=Notification.Category.TRANSACTION,
+                    title="Withdrawal completed",
+                    body=f"Your withdrawal from {withdrawal.account.name} has completed.",
+                )
             else:
                 withdrawal.status = WithdrawalRequest.Status.FAILED
                 if hold:
                     hold.status = LedgerEntry.Status.FAILED
                     hold.save(update_fields=["status"])
+                Notification.objects.create(
+                    user=withdrawal.account.owner,
+                    category=Notification.Category.TRANSACTION,
+                    title="Withdrawal failed",
+                    body=f"Your withdrawal from {withdrawal.account.name} could not be completed.",
+                )
 
             withdrawal.save(update_fields=["status"])

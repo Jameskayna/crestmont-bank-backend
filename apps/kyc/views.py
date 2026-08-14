@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from apps.notifications.models import Notification
 from apps.users.models import KYCStatus
 
 from .models import KYCDocument
@@ -32,5 +33,11 @@ class KYCDocumentListCreateView(APIView):
             if request.user.kyc_status in (KYCStatus.UNVERIFIED, KYCStatus.REJECTED):
                 request.user.kyc_status = KYCStatus.PENDING
                 request.user.save(update_fields=["kyc_status"])
+            Notification.objects.create(
+                user=request.user,
+                category=Notification.Category.KYC,
+                title="Document submitted",
+                body=f"Your {doc.get_doc_type_display()} has been submitted for review.",
+            )
 
         return Response(KYCDocumentSerializer(doc).data, status=status.HTTP_201_CREATED)
