@@ -110,6 +110,7 @@ REST_FRAMEWORK = {
         "transfer": "20/min",
         "deposit": "10/min",
         "withdrawal": "10/min",
+        "kyc": "10/min",
     },
     "DEFAULT_FILTER_BACKENDS": ("django_filters.rest_framework.DjangoFilterBackend",),
 }
@@ -160,5 +161,13 @@ USE_TZ = True
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+
+# KYCDocument.file lands here for now. Render's web service disk is
+# ephemeral — this does NOT survive a redeploy or restart, so it's fine for
+# local dev/testing only. Before real KYC documents from real users are
+# collected, this needs to move to S3 (django-storages) or a Render Disk,
+# per the private-object-storage design already assumed in apps/kyc/models.py.
+MEDIA_URL = "media/"
+MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
