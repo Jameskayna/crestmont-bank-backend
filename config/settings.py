@@ -111,6 +111,7 @@ REST_FRAMEWORK = {
         "deposit": "10/min",
         "withdrawal": "10/min",
         "kyc": "10/min",
+        "loan": "10/min",
     },
     "DEFAULT_FILTER_BACKENDS": ("django_filters.rest_framework.DjangoFilterBackend",),
 }
