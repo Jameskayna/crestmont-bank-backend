@@ -73,21 +73,29 @@ class TransferCreateView(APIView):
 
         amount = data["amount_cents"]
 
+        to_account_id = Account.objects.filter(
+            account_number=data["to_account"]
+        ).values_list("id", flat=True).first()
+        if to_account_id is None:
+            return Response({"error": "Destination account number not found."}, status=status.HTTP_404_NOT_FOUND)
+
         with transaction.atomic():
             # Lock both rows for the duration of the transfer so a concurrent
             # transfer can't read a stale balance; ordering by id keeps two
             # transfers between the same pair of accounts from deadlocking.
             locked = Account.objects.select_for_update().filter(
-                id__in=[data["from_account"], data["to_account"]]
+                id__in=[data["from_account"], to_account_id]
             ).order_by("id")
             accounts_by_id = {a.id: a for a in locked}
             from_account = accounts_by_id.get(data["from_account"])
-            to_account = accounts_by_id.get(data["to_account"])
+            to_account = accounts_by_id.get(to_account_id)
 
             if from_account is None or from_account.owner_id != request.user.id:
                 return Response({"error": "Source account not found."}, status=status.HTTP_404_NOT_FOUND)
             if to_account is None:
-                return Response({"error": "Destination account not found."}, status=status.HTTP_404_NOT_FOUND)
+                return Response({"error": "Destination account number not found."}, status=status.HTTP_404_NOT_FOUND)
+            if from_account.id == to_account.id:
+                return Response({"error": "Cannot transfer to the same account."}, status=status.HTTP_400_BAD_REQUEST)
             if from_account.status != AccountStatus.ACTIVE:
                 return Response({"error": "Source account is not active."}, status=status.HTTP_400_BAD_REQUEST)
             if to_account.status != AccountStatus.ACTIVE:

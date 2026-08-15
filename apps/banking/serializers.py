@@ -36,14 +36,9 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
 
 class TransferCreateSerializer(serializers.Serializer):
     from_account = serializers.UUIDField()
-    to_account = serializers.UUIDField()
+    to_account = serializers.CharField(max_length=17)
     amount_cents = serializers.IntegerField(min_value=1)
     note = serializers.CharField(required=False, allow_blank=True, max_length=255)
-
-    def validate(self, data):
-        if data["from_account"] == data["to_account"]:
-            raise serializers.ValidationError("Cannot transfer to the same account.")
-        return data
 
 
 class TransferSerializer(serializers.ModelSerializer):
