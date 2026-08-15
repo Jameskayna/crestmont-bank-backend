@@ -140,10 +140,20 @@ X_FRAME_OPTIONS = "DENY"
 
 EMAIL_BACKEND = config("EMAIL_BACKEND")
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL")
-ANYMAIL = {
-    "MAILGUN_API_KEY": config("MAILGUN_API_KEY", default=""),
-    "MAILGUN_SENDER_DOMAIN": config("MAILGUN_SENDER_DOMAIN", default=""),
-}
+# Zoho Mail via SMTP — Anymail doesn't support Zoho as an ESP, so this
+# bypasses Anymail entirely and uses Django's built-in SMTP backend.
+# These are only read when EMAIL_BACKEND is the smtp backend; the console
+# backend (local dev) ignores them.
+EMAIL_HOST = config("EMAIL_HOST", default="smtp.zoho.com")
+EMAIL_PORT = config("EMAIL_PORT", default=465, cast=int)
+EMAIL_USE_SSL = config("EMAIL_USE_SSL", default=True, cast=bool)
+EMAIL_USE_TLS = config("EMAIL_USE_TLS", default=False, cast=bool)
+EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="")
+EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
+
+SUPPORT_EMAIL = config("SUPPORT_EMAIL", default=DEFAULT_FROM_EMAIL)
+SUPPORT_PHONE = config("SUPPORT_PHONE", default="")
+KYC_REVIEW_SLA_TEXT = config("KYC_REVIEW_SLA_TEXT", default="1-2 business days")
 
 STRIPE_SECRET_KEY = config("STRIPE_SECRET_KEY", default="")
 STRIPE_PUBLISHABLE_KEY = config("STRIPE_PUBLISHABLE_KEY", default="")

@@ -12,8 +12,8 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.auditlog.utils import log_action
 
-from .models import EmailVerificationToken, PasswordResetToken
-from .permissions import IsApprover, IsStaff
+from .models import EmailVerificationToken, PasswordResetToken, Role
+from .permissions import IsApprover, IsConfigManager, IsStaff
 from .serializers import (
     LoginSerializer,
     PasswordResetConfirmSerializer,
@@ -291,4 +291,23 @@ class AdminUserUnblockView(APIView):
         user.frozen_reason = ""
         user.save(update_fields=["is_frozen", "frozen_reason"])
         log_action(request, "user.unblock_login", "User", user.id)
+        return Response(UserSerializer(user).data)
+
+
+class AdminUserPromoteView(APIView):
+    """Grants admin (role=admin) access. This is the app's own permission
+    tier used by IsStaff/IsApprover/IsConfigManager — distinct from Django's
+    is_staff/is_superuser, which this app doesn't use for API authorization
+    and which this view deliberately leaves untouched."""
+
+    permission_classes = [IsConfigManager]
+
+    def post(self, request, pk):
+        user = get_object_or_404(User, pk=pk)
+        if user.role in (Role.ADMIN, Role.SUPERADMIN):
+            return Response({"error": "This user is already an administrator."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.role = Role.ADMIN
+        user.save(update_fields=["role"])
+        log_action(request, "user.promote_admin", "User", user.id)
         return Response(UserSerializer(user).data)

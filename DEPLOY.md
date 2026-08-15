@@ -61,8 +61,20 @@ In the [Render dashboard](https://dashboard.render.com):
      `DB_*` variables only if `DATABASE_URL` isn't set).
    - `CORS_ALLOWED_ORIGINS` — your frontend's URL, e.g. the static site
      from earlier or `app.crestmontreservebank.com`
-   - Email and Stripe variables can stay blank for now — nothing calls
-     them yet since Stage 3 (the actual banking API) isn't built
+   - Email (required — account/KYC/transfer/loan/card notifications send
+     through these):
+     - `EMAIL_BACKEND` — `django.core.mail.backends.smtp.EmailBackend`
+     - `EMAIL_HOST_USER` — `accountinfo@crestmontreservebank.com`
+     - `EMAIL_HOST_PASSWORD` — a Zoho **app-specific** password (Zoho Mail
+       → Settings → Security → App Passwords), not the regular login
+       password
+     - `DEFAULT_FROM_EMAIL` — `accountinfo@crestmontreservebank.com`
+     - `SUPPORT_EMAIL` — `accountinfo@crestmontreservebank.com`
+     - `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_USE_SSL` default to Zoho's SMTP
+       settings (`smtp.zoho.com`, `465`, `True`) and don't need to be set
+       unless you're using a different provider
+   - Stripe variables can stay blank for now — nothing calls them yet
+     since Stage 3 (the actual banking API) isn't built
 5. Click **Create Web Service**
 
 Render builds and deploys. First build takes a few minutes since it's
