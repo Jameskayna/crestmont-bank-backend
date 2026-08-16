@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Account, DepositRequest, LedgerEntry, ManualAdjustment, Transfer, WithdrawalRequest
+from .models import Account, Card, DepositRequest, LedgerEntry, ManualAdjustment, Transfer, WithdrawalRequest
 
 
 class AccountSerializer(serializers.ModelSerializer):
@@ -89,6 +89,29 @@ class AdminWithdrawalSerializer(serializers.ModelSerializer):
             "status", "rejection_reason", "created_at", "updated_at",
         ]
         read_only_fields = fields
+
+
+class AdminCardSerializer(serializers.ModelSerializer):
+    cardholder_name = serializers.SerializerMethodField()
+    cardholder_email = serializers.CharField(source="account.owner.email", read_only=True)
+    account_name = serializers.CharField(source="account.name", read_only=True)
+    masked_number = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Card
+        fields = [
+            "id", "account", "account_name", "cardholder_name", "cardholder_email",
+            "masked_number", "last4", "brand", "expiry_month", "expiry_year",
+            "status", "block_reason", "created_at",
+        ]
+        read_only_fields = fields
+
+    def get_cardholder_name(self, obj):
+        owner = obj.account.owner
+        return owner.get_full_name() or owner.email
+
+    def get_masked_number(self, obj):
+        return f"•••• •••• •••• {obj.last4}"
 
 
 class ManualAdjustmentCreateSerializer(serializers.Serializer):

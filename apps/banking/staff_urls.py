@@ -3,6 +3,9 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
+    path("staff/cards", views.AdminCardListView.as_view(), name="staff-card-list"),
+    path("staff/cards/<uuid:pk>/block", views.AdminCardBlockView.as_view(), name="staff-card-block"),
+    path("staff/cards/<uuid:pk>/reactivate", views.AdminCardReactivateView.as_view(), name="staff-card-reactivate"),
     path("staff/accounts/<uuid:pk>/freeze", views.AdminAccountFreezeView.as_view(), name="staff-account-freeze"),
     path("staff/accounts/<uuid:pk>/unfreeze", views.AdminAccountUnfreezeView.as_view(), name="staff-account-unfreeze"),
     path("staff/adjustments", views.AdminAdjustmentListCreateView.as_view(), name="staff-adjustment-list-create"),

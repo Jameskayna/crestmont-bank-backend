@@ -10,12 +10,22 @@ from rest_framework.views import APIView
 
 from apps.auditlog.utils import log_action
 from apps.notifications.models import Notification
-from apps.users.permissions import IsApprover
+from apps.users.permissions import IsApprover, IsStaff
 
-from .models import Account, AccountStatus, DepositRequest, LedgerEntry, ManualAdjustment, Transfer, WithdrawalRequest
+from .models import (
+    Account,
+    AccountStatus,
+    Card,
+    DepositRequest,
+    LedgerEntry,
+    ManualAdjustment,
+    Transfer,
+    WithdrawalRequest,
+)
 from .serializers import (
     AccountCreateSerializer,
     AccountSerializer,
+    AdminCardSerializer,
     AdminWithdrawalSerializer,
     DepositCreateSerializer,
     DepositSerializer,
@@ -418,6 +428,54 @@ class AdminAccountUnfreezeView(APIView):
         account.save(update_fields=["status"])
         log_action(request, "account.unfreeze", "Account", account.id)
         return Response(AccountSerializer(account).data)
+
+
+class AdminCardListView(APIView):
+    """Any staff role can view — matches the same read-only capability as
+    Users & Accounts. Blocking/reactivating requires IsApprover, below."""
+
+    permission_classes = [IsStaff]
+
+    def get(self, request):
+        cards = Card.objects.select_related("account", "account__owner").order_by("-created_at")
+        return Response(AdminCardSerializer(cards, many=True).data)
+
+
+class AdminCardBlockView(APIView):
+    permission_classes = [IsApprover]
+
+    def post(self, request, pk):
+        card = get_object_or_404(Card, pk=pk)
+        reason = request.data.get("reason", "")
+        if not reason:
+            return Response({"error": "A reason is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        card.status = Card.Status.BLOCKED
+        card.block_reason = reason
+        card.save(update_fields=["status", "block_reason"])  # triggers the card-blocked email signal
+        Notification.objects.create(
+            user=card.account.owner,
+            category=Notification.Category.SECURITY,
+            title="Card blocked",
+            body=f"Your card ending in {card.last4} has been blocked: {reason}",
+        )
+        log_action(request, "card.block", "Card", card.id, reason=reason)
+        return Response(AdminCardSerializer(card).data)
+
+
+class AdminCardReactivateView(APIView):
+    permission_classes = [IsApprover]
+
+    def post(self, request, pk):
+        card = get_object_or_404(Card, pk=pk)
+        if card.status != Card.Status.BLOCKED:
+            return Response({"error": "Only a blocked card can be reactivated."}, status=status.HTTP_400_BAD_REQUEST)
+
+        card.status = Card.Status.ACTIVE
+        card.block_reason = ""
+        card.save(update_fields=["status", "block_reason"])
+        log_action(request, "card.reactivate", "Card", card.id)
+        return Response(AdminCardSerializer(card).data)
 
 
 class AdminAdjustmentListCreateView(APIView):

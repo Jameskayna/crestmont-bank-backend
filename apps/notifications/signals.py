@@ -217,11 +217,7 @@ def on_loan_rejected(sender, instance, created, **kwargs):
 
 
 # ---------------------------------------------------------------------------
-# Card blocked — Card.Status.BLOCKED exists on the model, but no view,
-# serializer, or url anywhere in the app sets it yet, and there's no
-# block_reason field. This handler is correctly wired but will not fire
-# until a card-block action is built; block_reason is a placeholder until
-# then.
+# Card blocked — fires when AdminCardBlockView sets Card.status=BLOCKED.
 # ---------------------------------------------------------------------------
 
 @receiver(pre_save, sender=Card)
@@ -250,7 +246,7 @@ def on_card_blocked(sender, instance, created, **kwargs):
         card_last4=instance.last4,
         date_str=now.strftime("%B %d, %Y"),
         time_str=now.strftime("%I:%M %p %Z"),
-        block_reason="Suspicious activity detected on this card.",
+        block_reason=instance.block_reason or "Suspicious activity detected on this card.",
         support_email=SUPPORT_EMAIL,
         support_phone=SUPPORT_PHONE,
     )
