@@ -27,6 +27,7 @@ from .serializers import (
     AccountSerializer,
     AdminCardSerializer,
     AdminWithdrawalSerializer,
+    CardSerializer,
     DepositCreateSerializer,
     DepositSerializer,
     LedgerEntrySerializer,
@@ -64,6 +65,14 @@ class AccountTransactionsView(APIView):
         account = get_object_or_404(Account, pk=pk, owner=request.user)
         entries = account.ledger_entries.order_by("-created_at")
         return Response(LedgerEntrySerializer(entries, many=True).data)
+
+
+class AccountCardsView(APIView):
+    def get(self, request, pk):
+        # Same ownership-scoped 404 as AccountTransactionsView, above.
+        account = get_object_or_404(Account, pk=pk, owner=request.user)
+        cards = account.cards.order_by("-created_at")
+        return Response(CardSerializer(cards, many=True).data)
 
 
 class TransferCreateView(APIView):

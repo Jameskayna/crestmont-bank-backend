@@ -162,6 +162,7 @@ class WithdrawalRequest(models.Model):
 
 class Card(models.Model):
     class Status(models.TextChoices):
+        PENDING = "pending", "Pending activation"
         ACTIVE = "active", "Active"
         BLOCKED = "blocked", "Blocked"
         EXPIRED = "expired", "Expired"
