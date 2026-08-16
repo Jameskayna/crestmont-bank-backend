@@ -4,6 +4,8 @@ from . import views
 
 urlpatterns = [
     path("staff/cards", views.AdminCardListView.as_view(), name="staff-card-list"),
+    path("staff/cards/<uuid:pk>/approve", views.AdminCardApproveView.as_view(), name="staff-card-approve"),
+    path("staff/cards/<uuid:pk>/reject", views.AdminCardRejectView.as_view(), name="staff-card-reject"),
     path("staff/cards/<uuid:pk>/block", views.AdminCardBlockView.as_view(), name="staff-card-block"),
     path("staff/cards/<uuid:pk>/reactivate", views.AdminCardReactivateView.as_view(), name="staff-card-reactivate"),
     path("staff/accounts/<uuid:pk>/freeze", views.AdminAccountFreezeView.as_view(), name="staff-account-freeze"),

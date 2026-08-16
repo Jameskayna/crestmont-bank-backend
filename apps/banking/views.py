@@ -27,6 +27,7 @@ from .serializers import (
     AccountSerializer,
     AdminCardSerializer,
     AdminWithdrawalSerializer,
+    CardRequestCreateSerializer,
     CardSerializer,
     DepositCreateSerializer,
     DepositSerializer,
@@ -39,7 +40,7 @@ from .serializers import (
     WithdrawalSerializer,
 )
 from .stripe_service import create_deposit_intent, create_withdrawal_payout, verify_webhook_event
-from .utils import generate_account_number
+from .utils import generate_account_number, generate_card_details
 
 
 class AccountListCreateView(APIView):
@@ -67,12 +68,38 @@ class AccountTransactionsView(APIView):
         return Response(LedgerEntrySerializer(entries, many=True).data)
 
 
-class AccountCardsView(APIView):
-    def get(self, request, pk):
-        # Same ownership-scoped 404 as AccountTransactionsView, above.
-        account = get_object_or_404(Account, pk=pk, owner=request.user)
-        cards = account.cards.order_by("-created_at")
+class CardListCreateView(APIView):
+    """Mirrors LoanApplicationListCreateView: list the requester's own
+    cards, or submit a request for a new one."""
+
+    def get(self, request):
+        cards = Card.objects.filter(account__owner=request.user).order_by("-created_at")
         return Response(CardSerializer(cards, many=True).data)
+
+    def post(self, request):
+        serializer = CardRequestCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        account = get_object_or_404(Account, pk=data["account"], owner=request.user)
+        if account.cards.filter(status__in=[Card.Status.PENDING, Card.Status.ACTIVE]).exists():
+            return Response(
+                {"error": "This account already has a card that's active or under review."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        card = Card.objects.create(
+            account=account,
+            brand=data["brand"],
+            card_type=data["card_type"],
+        )
+        Notification.objects.create(
+            user=request.user,
+            category=Notification.Category.CARD,
+            title="Card request submitted",
+            body=f"Your {card.get_brand_display()} {card.card_type} card request for {account.name} is under review.",
+        )
+        return Response(CardSerializer(card).data, status=status.HTTP_201_CREATED)
 
 
 class TransferCreateView(APIView):
@@ -450,11 +477,62 @@ class AdminCardListView(APIView):
         return Response(AdminCardSerializer(cards, many=True).data)
 
 
+class AdminCardApproveView(APIView):
+    """Mirrors AdminLoanApproveView: in-app notification only, no email —
+    the card-approved moment isn't as security-sensitive as a block."""
+
+    permission_classes = [IsApprover]
+
+    def post(self, request, pk):
+        card = get_object_or_404(Card, pk=pk, status=Card.Status.PENDING)
+        issued = generate_card_details()
+        card.provider_card_id = issued["provider_card_id"]
+        card.last4 = issued["last4"]
+        card.expiry_month = issued["expiry_month"]
+        card.expiry_year = issued["expiry_year"]
+        card.status = Card.Status.ACTIVE
+        card.reviewed_by = request.user
+        card.save(update_fields=[
+            "provider_card_id", "last4", "expiry_month", "expiry_year", "status", "reviewed_by",
+        ])
+        Notification.objects.create(
+            user=card.account.owner,
+            category=Notification.Category.CARD,
+            title="Card approved",
+            body=f"Your {card.get_brand_display()} card ending in {card.last4} is ready to use.",
+        )
+        log_action(request, "card.approve", "Card", card.id)
+        return Response(AdminCardSerializer(card).data)
+
+
+class AdminCardRejectView(APIView):
+    """Mirrors AdminLoanRejectView: reason required, in-app notification
+    here plus a rejection email via the on_card_rejected signal."""
+
+    permission_classes = [IsApprover]
+
+    def post(self, request, pk):
+        card = get_object_or_404(Card, pk=pk, status=Card.Status.PENDING)
+        reason = request.data.get("reason", "")
+        if not reason:
+            return Response({"error": "A reason is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        card.status = Card.Status.REJECTED
+        card.rejection_reason = reason
+        card.reviewed_by = request.user
+        card.save(update_fields=["status", "rejection_reason", "reviewed_by"])  # triggers the rejection email signal
+        Notification.objects.create(
+            user=card.account.owner, category=Notification.Category.CARD, title="Card request declined", body=reason
+        )
+        log_action(request, "card.reject", "Card", card.id, reason=reason)
+        return Response(AdminCardSerializer(card).data)
+
+
 class AdminCardBlockView(APIView):
     permission_classes = [IsApprover]
 
     def post(self, request, pk):
-        card = get_object_or_404(Card, pk=pk)
+        card = get_object_or_404(Card, pk=pk, status=Card.Status.ACTIVE)
         reason = request.data.get("reason", "")
         if not reason:
             return Response({"error": "A reason is required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -464,7 +542,7 @@ class AdminCardBlockView(APIView):
         card.save(update_fields=["status", "block_reason"])  # triggers the card-blocked email signal
         Notification.objects.create(
             user=card.account.owner,
-            category=Notification.Category.SECURITY,
+            category=Notification.Category.CARD,
             title="Card blocked",
             body=f"Your card ending in {card.last4} has been blocked: {reason}",
         )

@@ -161,24 +161,47 @@ class WithdrawalRequest(models.Model):
 
 
 class Card(models.Model):
+    """
+    Rows start life as a customer request (PENDING, no issued details yet)
+    and only gain provider_card_id/last4/expiry once staff approves —
+    same shape as LoanApplication separating requested terms from what's
+    only known at approval time.
+    """
+
     class Status(models.TextChoices):
-        PENDING = "pending", "Pending activation"
+        PENDING = "pending", "Pending review"
         ACTIVE = "active", "Active"
+        REJECTED = "rejected", "Rejected"
         BLOCKED = "blocked", "Blocked"
         EXPIRED = "expired", "Expired"
+
+    class Brand(models.TextChoices):
+        VISA = "visa", "Visa"
+        MASTERCARD = "mastercard", "Mastercard"
+        VERVE = "verve", "Verve"
+
+    class CardType(models.TextChoices):
+        DEBIT = "debit", "Debit"
+        CREDIT = "credit", "Credit"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     account = models.ForeignKey(Account, on_delete=models.CASCADE, related_name="cards")
     # Real PANs are NEVER stored in your own DB — a card issuing partner
     # (Stripe Issuing, Marqeta, or your BaaS partner) tokenizes and returns
-    # only a reference plus the last 4 digits for display.
-    provider_card_id = models.CharField(max_length=120)
-    last4 = models.CharField(max_length=4)
-    brand = models.CharField(max_length=20, blank=True)
-    expiry_month = models.PositiveSmallIntegerField()
-    expiry_year = models.PositiveSmallIntegerField()
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
+    # only a reference plus the last 4 digits for display. Both blank until
+    # the request is approved and a card is actually issued.
+    provider_card_id = models.CharField(max_length=120, blank=True)
+    last4 = models.CharField(max_length=4, blank=True)
+    brand = models.CharField(max_length=20, choices=Brand.choices)
+    card_type = models.CharField(max_length=10, choices=CardType.choices, default=CardType.DEBIT)
+    expiry_month = models.PositiveSmallIntegerField(null=True, blank=True)
+    expiry_year = models.PositiveSmallIntegerField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     block_reason = models.CharField(max_length=255, blank=True)
+    rejection_reason = models.CharField(max_length=255, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
 

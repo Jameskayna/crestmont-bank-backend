@@ -11,6 +11,7 @@ from apps.users.models import Role, User
 from .notifications import (
     notify_account_created,
     notify_card_blocked,
+    notify_card_rejected,
     notify_kyc_approved,
     notify_kyc_declined,
     notify_kyc_pending,
@@ -249,4 +250,29 @@ def on_card_blocked(sender, instance, created, **kwargs):
         block_reason=instance.block_reason or "Suspicious activity detected on this card.",
         support_email=SUPPORT_EMAIL,
         support_phone=SUPPORT_PHONE,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Card request rejected — fires when AdminCardRejectView sets
+# Card.status=REJECTED. Same stash_previous_card_status pre_save above
+# covers this transition too.
+# ---------------------------------------------------------------------------
+
+@receiver(post_save, sender=Card)
+def on_card_rejected(sender, instance, created, **kwargs):
+    if created:
+        return
+    previous_status = getattr(instance, "_previous_status", None)
+    if previous_status == instance.status or instance.status != Card.Status.REJECTED:
+        return
+
+    owner = instance.account.owner
+    notify_card_rejected(
+        customer_email=owner.email,
+        customer_name=_display_name(owner),
+        card_brand=instance.get_brand_display(),
+        date_str=timezone.localtime().strftime("%B %d, %Y"),
+        rejection_reason=instance.rejection_reason,
+        support_email=SUPPORT_EMAIL,
     )

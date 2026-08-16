@@ -8,6 +8,7 @@ class Notification(models.Model):
         SECURITY = "security", "Security"          # new login, password changed
         TRANSACTION = "transaction", "Transaction"
         LOAN = "loan", "Loan"
+        CARD = "card", "Card"
         KYC = "kyc", "KYC"
         SYSTEM = "system", "System"                 # admin-broadcast messages
 

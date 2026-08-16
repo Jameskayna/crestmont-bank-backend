@@ -122,6 +122,22 @@ def notify_loan_blocked(customer_email, customer_name, loan_account_number, date
     )
 
 
+def notify_card_rejected(customer_email, customer_name, card_brand, date_str, rejection_reason, support_email):
+    send_mail(
+        subject="Your card request was declined",
+        message=(
+            f"Hi {customer_name},\n\n"
+            f"Your {card_brand} card request was declined on {date_str}.\n\n"
+            f"Reason: {rejection_reason}\n\n"
+            f"Contact us at {support_email} if you'd like to discuss this decision or request again.\n\n"
+            f"— Crestmont Reserve Bank"
+        ),
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[customer_email],
+        fail_silently=False,
+    )
+
+
 def notify_card_blocked(customer_email, customer_name, card_last4, date_str, time_str, block_reason,
                          support_email, support_phone):
     contact_line = f"contact us at {support_email}"
