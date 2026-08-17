@@ -35,10 +35,16 @@ class Notice(models.Model):
         WARNING = "warning", "Warning"
         URGENT = "urgent", "Urgent"
 
+    class Audience(models.TextChoices):
+        ALL = "all", "All customers"
+        SPECIFIC = "specific", "Specific users"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     title = models.CharField(max_length=150)
     message = models.TextField()
     severity = models.CharField(max_length=20, choices=Severity.choices, default=Severity.INFO)
+    audience = models.CharField(max_length=20, choices=Audience.choices, default=Audience.ALL)
+    target_users = models.ManyToManyField(settings.AUTH_USER_MODEL, blank=True, related_name="targeted_notices")
     is_active = models.BooleanField(default=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+"

@@ -1,3 +1,4 @@
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.response import Response
@@ -33,10 +34,15 @@ class NotificationMarkAllReadView(APIView):
 
 class ActiveNoticeListView(APIView):
     """Customer-facing: powers the dashboard banner. Any authenticated
-    user, not just staff — this is a broadcast, not an admin surface."""
+    user, not just staff — this is a broadcast, not an admin surface.
+    A specific-users notice only reaches the users it targets."""
 
     def get(self, request):
-        notices = Notice.objects.filter(is_active=True)
+        notices = (
+            Notice.objects.filter(is_active=True)
+            .filter(Q(audience=Notice.Audience.ALL) | Q(audience=Notice.Audience.SPECIFIC, target_users=request.user))
+            .distinct()
+        )
         return Response(NoticeSerializer(notices, many=True).data)
 
 
@@ -56,7 +62,12 @@ class AdminNoticeListCreateView(APIView):
 
         serializer = NoticeWriteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        notice = Notice.objects.create(created_by=request.user, **serializer.validated_data)
+        data = dict(serializer.validated_data)
+        target_user_ids = data.pop("target_user_ids", [])
+
+        notice = Notice.objects.create(created_by=request.user, **data)
+        if data.get("audience") == Notice.Audience.SPECIFIC:
+            notice.target_users.set(target_user_ids)
         log_action(request, "notice.create", "Notice", notice.id, metadata=serializer.validated_data)
         return Response(NoticeSerializer(notice).data, status=status.HTTP_201_CREATED)
 
@@ -71,9 +82,21 @@ class AdminNoticeDetailView(APIView):
         notice = get_object_or_404(Notice, pk=pk)
         serializer = NoticeWriteSerializer(data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
-        for field, value in serializer.validated_data.items():
+        data = dict(serializer.validated_data)
+        target_user_ids = data.pop("target_user_ids", None)
+
+        for field, value in data.items():
             setattr(notice, field, value)
         notice.save()
+
+        # Switching to "all customers" always clears any previously
+        # targeted users; switching to (or staying on) "specific" only
+        # updates the list when the caller actually sent one.
+        if notice.audience == Notice.Audience.ALL:
+            notice.target_users.clear()
+        elif target_user_ids is not None:
+            notice.target_users.set(target_user_ids)
+
         log_action(request, "notice.update", "Notice", notice.id, metadata=serializer.validated_data)
         return Response(NoticeSerializer(notice).data)
 

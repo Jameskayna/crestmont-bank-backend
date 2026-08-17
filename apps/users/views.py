@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django_otp.plugins.otp_totp.models import TOTPDevice
@@ -11,6 +12,7 @@ from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, Ou
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.auditlog.utils import log_action
+from apps.notifications.models import Notification
 
 from .models import EmailVerificationToken, PasswordResetToken, Role
 from .permissions import IsApprover, IsConfigManager, IsStaff
@@ -233,7 +235,9 @@ class AdminUserListView(APIView):
         qs = User.objects.all().order_by("-created_at")
         search = request.query_params.get("search")
         if search:
-            qs = qs.filter(email__icontains=search)
+            qs = qs.filter(
+                Q(email__icontains=search) | Q(first_name__icontains=search) | Q(last_name__icontains=search)
+            )
         return Response(UserSerializer(qs[:100], many=True).data)
 
 
@@ -310,4 +314,34 @@ class AdminUserPromoteView(APIView):
         user.role = Role.ADMIN
         user.save(update_fields=["role"])
         log_action(request, "user.promote_admin", "User", user.id)
+        return Response(UserSerializer(user).data)
+
+
+class AdminUserDemoteView(APIView):
+    """Revokes admin access, mirroring AdminUserPromoteView. A staff member
+    can never revoke their own access — the one way to lose admin rights
+    is to have another admin do it, which prevents accidentally locking
+    everyone out."""
+
+    permission_classes = [IsConfigManager]
+
+    def post(self, request, pk):
+        user = get_object_or_404(User, pk=pk)
+        if user.id == request.user.id:
+            return Response(
+                {"error": "You cannot revoke your own admin access."}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if user.role not in (Role.ADMIN, Role.SUPERADMIN):
+            return Response({"error": "This user is not an administrator."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.role = Role.CUSTOMER
+        user.save(update_fields=["role"])
+        Notification.objects.create(
+            user=user,
+            category=Notification.Category.SECURITY,
+            title="Admin access revoked",
+            body="Your administrator access to Crestmont Reserve Bank's staff console has been revoked.",
+        )
+        log_action(request, "user.revoke_admin", "User", user.id)
         return Response(UserSerializer(user).data)

@@ -1,5 +1,6 @@
 import uuid
 from django.conf import settings
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models
 
 
@@ -19,7 +20,11 @@ class AuditLog(models.Model):
     target_type = models.CharField(max_length=50)       # e.g. "User", "Account", "LoanApplication"
     target_id = models.CharField(max_length=64)
     reason = models.TextField(blank=True)
-    metadata = models.JSONField(default=dict, blank=True)  # e.g. {"old_status": "active", "new_status": "frozen"}
+    # DjangoJSONEncoder (not the plain default) so values like UUIDs and
+    # datetimes — which several callers pass straight from a serializer's
+    # validated_data — serialize without every caller having to stringify
+    # them by hand first.
+    metadata = models.JSONField(default=dict, blank=True, encoder=DjangoJSONEncoder)
     ip_address = models.GenericIPAddressField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
