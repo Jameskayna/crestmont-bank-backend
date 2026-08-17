@@ -90,6 +90,13 @@ class LedgerEntry(models.Model):
     provider_ref = models.CharField(max_length=120, blank=True)  # e.g. Stripe payment_intent id
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # Set only when this entry records something that happened on an
+    # earlier date than when it was entered (a backdated manual
+    # adjustment) — null means "same day as created_at". created_at
+    # itself is never touched: it stays the true, append-only record of
+    # when the entry was actually written.
+    transaction_date = models.DateField(null=True, blank=True)
+
     class Meta:
         indexes = [
             models.Index(fields=["account", "-created_at"]),
@@ -219,11 +226,17 @@ class ManualAdjustment(models.Model):
         REJECTED = "rejected", "Rejected"
 
     AUTO_APPROVE_LIMIT_CENTS = 10_000  # $100 — above this, needs a second approver
+    MAX_BACKDATE_DAYS = 90  # how far in the past transaction_date is allowed to be
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     account = models.ForeignKey(Account, on_delete=models.PROTECT, related_name="manual_adjustments")
     amount_cents = models.BigIntegerField()  # positive = credit, negative = debit
     reason = models.CharField(max_length=255)
+    # Set when this adjustment records something that actually happened
+    # earlier (e.g. an unlogged wire transfer) — null means "today".
+    # Bounded by MAX_BACKDATE_DAYS and the account's own created_at; see
+    # ManualAdjustmentCreateSerializer / AdminAdjustmentListCreateView.
+    transaction_date = models.DateField(null=True, blank=True)
     requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
     approved_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+"

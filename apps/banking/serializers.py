@@ -1,3 +1,6 @@
+from datetime import timedelta
+
+from django.utils import timezone
 from rest_framework import serializers
 
 from .models import Account, Card, DepositRequest, LedgerEntry, ManualAdjustment, Transfer, WithdrawalRequest
@@ -29,7 +32,7 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
         model = LedgerEntry
         fields = [
             "id", "amount_cents", "description", "status",
-            "source_type", "source_id", "created_at",
+            "source_type", "source_id", "created_at", "transaction_date",
         ]
         read_only_fields = fields
 
@@ -159,10 +162,27 @@ class ManualAdjustmentCreateSerializer(serializers.Serializer):
     account = serializers.UUIDField()
     amount_cents = serializers.IntegerField()  # signed: positive = credit, negative = debit
     reason = serializers.CharField(max_length=255)
+    # Null means "today" — only set when recording something that
+    # happened earlier but was never captured (e.g. an unlogged wire).
+    # The account-created_at floor is checked in the view, where the
+    # account is already fetched.
+    transaction_date = serializers.DateField(required=False, allow_null=True, default=None)
 
     def validate_amount_cents(self, value):
         if value == 0:
             raise serializers.ValidationError("Amount cannot be zero.")
+        return value
+
+    def validate_transaction_date(self, value):
+        if value is None:
+            return value
+        today = timezone.localdate()
+        if value > today:
+            raise serializers.ValidationError("Transaction date cannot be in the future.")
+        if value < today - timedelta(days=ManualAdjustment.MAX_BACKDATE_DAYS):
+            raise serializers.ValidationError(
+                f"Transaction date cannot be more than {ManualAdjustment.MAX_BACKDATE_DAYS} days in the past."
+            )
         return value
 
 
@@ -176,6 +196,6 @@ class ManualAdjustmentSerializer(serializers.ModelSerializer):
         model = ManualAdjustment
         fields = [
             "id", "account", "account_name", "account_owner_email", "amount_cents", "reason",
-            "requested_by_email", "approved_by_email", "status", "created_at", "resolved_at",
+            "transaction_date", "requested_by_email", "approved_by_email", "status", "created_at", "resolved_at",
         ]
         read_only_fields = fields

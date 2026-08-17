@@ -586,12 +586,20 @@ class AdminAdjustmentListCreateView(APIView):
         account = get_object_or_404(Account, pk=data["account"])
         amount = data["amount_cents"]
         auto_approved = abs(amount) <= ManualAdjustment.AUTO_APPROVE_LIMIT_CENTS
+        transaction_date = data["transaction_date"]
+
+        if transaction_date is not None and transaction_date < timezone.localdate(account.created_at):
+            return Response(
+                {"error": "Transaction date cannot be before this account was opened."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         with transaction.atomic():
             adjustment = ManualAdjustment.objects.create(
                 account=account,
                 amount_cents=amount,
                 reason=data["reason"],
+                transaction_date=transaction_date,
                 requested_by=request.user,
                 approved_by=request.user if auto_approved else None,
                 status=ManualAdjustment.Status.POSTED if auto_approved else ManualAdjustment.Status.PENDING_APPROVAL,
@@ -605,6 +613,7 @@ class AdminAdjustmentListCreateView(APIView):
                     status=LedgerEntry.Status.POSTED,
                     source_type=LedgerEntry.SourceType.MANUAL_ADJUSTMENT,
                     source_id=adjustment.id,
+                    transaction_date=transaction_date,
                 )
                 Notification.objects.create(
                     user=account.owner,
@@ -646,6 +655,7 @@ class AdminAdjustmentApproveView(APIView):
                 status=LedgerEntry.Status.POSTED,
                 source_type=LedgerEntry.SourceType.MANUAL_ADJUSTMENT,
                 source_id=adjustment.id,
+                transaction_date=adjustment.transaction_date,
             )
             Notification.objects.create(
                 user=adjustment.account.owner,
