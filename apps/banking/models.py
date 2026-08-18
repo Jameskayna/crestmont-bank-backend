@@ -120,6 +120,23 @@ class Transfer(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
 
+class PendingTransfer(models.Model):
+    """A transfer awaiting email-OTP confirmation. Deliberately holds no
+    Transfer/LedgerEntry rows and moves no money — those are only created
+    once TransferConfirmView verifies the OTP, so a stalled or abandoned
+    OTP step can never leave a transfer half-applied. Account/balance/status
+    are re-validated again at confirm time; the snapshot here is just what
+    was true when the user submitted the form."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="pending_transfers")
+    from_account = models.ForeignKey(Account, on_delete=models.CASCADE, related_name="+")
+    to_account = models.ForeignKey(Account, on_delete=models.CASCADE, related_name="+")
+    amount_cents = models.BigIntegerField()
+    note = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
 class DepositRequest(models.Model):
     """Funding an account from an external card/bank via Stripe."""
     class Status(models.TextChoices):

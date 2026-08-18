@@ -2,6 +2,7 @@ from django.contrib.auth import get_user_model
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django_otp.plugins.otp_email.models import EmailDevice
 from django_otp.plugins.otp_totp.models import TOTPDevice
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -17,6 +18,8 @@ from apps.notifications.models import Notification
 from .models import EmailVerificationToken, PasswordResetToken, Role
 from .permissions import IsApprover, IsConfigManager, IsStaff
 from .serializers import (
+    LoginOtpResendSerializer,
+    LoginOtpVerifySerializer,
     LoginSerializer,
     PasswordResetConfirmSerializer,
     PasswordResetRequestSerializer,
@@ -26,6 +29,7 @@ from .serializers import (
 from .utils import (
     generate_raw_token,
     hash_token,
+    send_email_otp_challenge,
     send_password_reset_email,
     send_verification_email,
     token_expiry,
@@ -93,6 +97,10 @@ class VerifyEmailView(APIView):
 
 
 class LoginView(APIView):
+    """Step 1: verify the password, then email a one-time code. Tokens are
+    never issued here — only LoginOtpVerifyView issues them, once the code
+    (and TOTP, for accounts that also have that enabled) checks out."""
+
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth"
@@ -102,7 +110,6 @@ class LoginView(APIView):
         serializer.is_valid(raise_exception=True)
         email = serializer.validated_data["email"].lower()
         password = serializer.validated_data["password"]
-        totp_code = serializer.validated_data.get("totp_code", "")
 
         user = User.objects.filter(email__iexact=email).first()
         # Always run password hashing even when the user doesn't exist, so
@@ -114,15 +121,84 @@ class LoginView(APIView):
         if user.is_frozen:
             return Response({"error": "This account is currently restricted. Contact support."}, status=403)
 
+        device, _ = EmailDevice.objects.get_or_create(
+            user=user, name="login", defaults={"confirmed": True}
+        )
+        if not device.confirmed:
+            device.confirmed = True
+            device.save(update_fields=["confirmed"])
+
+        try:
+            send_email_otp_challenge(device)
+        except Exception:
+            return Response(
+                {"error": "We couldn't send your verification code. Please try again in a moment."},
+                status=503,
+            )
+
+        return Response({"requires_email_otp": True, "requires_2fa": user.is_2fa_enabled})
+
+
+class LoginOtpVerifyView(APIView):
+    """Step 2: the code emailed by LoginView (plus a TOTP code, if the
+    account also has authenticator-app 2FA enabled) completes login."""
+
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "otp"
+
+    def post(self, request):
+        serializer = LoginOtpVerifySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data["email"].lower()
+        code = serializer.validated_data["code"]
+        totp_code = serializer.validated_data.get("totp_code", "")
+
+        user = User.objects.filter(email__iexact=email).first()
+        if not user:
+            return Response({"error": "Incorrect or expired code."}, status=400)
+
+        if user.is_frozen:
+            return Response({"error": "This account is currently restricted. Contact support."}, status=403)
+
+        device = EmailDevice.objects.filter(user=user, name="login", confirmed=True).first()
+        if not device or not device.verify_token(code):
+            return Response({"error": "Incorrect or expired code."}, status=400)
+
         if user.is_2fa_enabled:
-            if not totp_code:
-                return Response({"requires_2fa": True}, status=200)
-            device = TOTPDevice.objects.filter(user=user, confirmed=True).first()
-            if not device or not device.verify_token(totp_code):
+            totp_device = TOTPDevice.objects.filter(user=user, confirmed=True).first()
+            if not totp_code or not totp_device or not totp_device.verify_token(totp_code):
                 return Response({"error": "Invalid authentication code."}, status=401)
 
         tokens = issue_tokens(user)
         return Response({"user": UserSerializer(user).data, **tokens})
+
+
+class LoginOtpResendView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "otp"
+
+    def post(self, request):
+        serializer = LoginOtpResendSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data["email"].lower()
+
+        user = User.objects.filter(email__iexact=email).first()
+        device = (
+            EmailDevice.objects.filter(user=user, name="login", confirmed=True).first()
+            if user
+            else None
+        )
+        if device:
+            try:
+                send_email_otp_challenge(device)
+            except Exception:
+                pass
+
+        # Same email-enumeration-safe shape as PasswordResetRequestView: one
+        # generic response whether or not the email/device exists.
+        return Response({"message": "If a login is in progress for that email, a new code has been sent."})
 
 
 class RefreshMeView(APIView):
@@ -296,6 +372,27 @@ class AdminUserUnblockView(APIView):
         user.save(update_fields=["is_frozen", "frozen_reason"])
         log_action(request, "user.unblock_login", "User", user.id)
         return Response(UserSerializer(user).data)
+
+
+class AdminUserClearLoginOtpView(APIView):
+    """Break-glass unstick for a user whose registered email can't receive
+    the mandatory login OTP (typo, dead inbox, spam-filtered) — deletes
+    their login challenge device so their next login attempt starts clean.
+    This does not skip OTP entirely; it just clears stuck state so a fresh
+    code can be generated and (hopefully, once the email is fixed) delivered."""
+
+    permission_classes = [IsApprover]
+
+    def post(self, request, pk):
+        user = get_object_or_404(User, pk=pk)
+        reason = request.data.get("reason", "")
+        if not reason:
+            return Response({"error": "A reason is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        EmailDevice.objects.filter(user=user, name="login").delete()
+
+        log_action(request, "user.clear_login_otp", "User", user.id, reason=reason)
+        return Response({"message": "Login verification cleared. The user can try logging in again."})
 
 
 class AdminUserPromoteView(APIView):

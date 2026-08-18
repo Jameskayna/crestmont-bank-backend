@@ -37,7 +37,16 @@ class RegisterSerializer(serializers.ModelSerializer):
 class LoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True)
+
+
+class LoginOtpVerifySerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    code = serializers.CharField(max_length=6)
     totp_code = serializers.CharField(required=False, allow_blank=True, max_length=6)
+
+
+class LoginOtpResendSerializer(serializers.Serializer):
+    email = serializers.EmailField()
 
 
 class PasswordResetRequestSerializer(serializers.Serializer):

@@ -1,7 +1,10 @@
+from datetime import timedelta
+
 import stripe
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django_otp.plugins.otp_email.models import EmailDevice
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -11,6 +14,7 @@ from rest_framework.views import APIView
 from apps.auditlog.utils import log_action
 from apps.notifications.models import Notification
 from apps.users.permissions import IsApprover, IsStaff
+from apps.users.utils import send_email_otp_challenge
 
 from .models import (
     Account,
@@ -19,6 +23,7 @@ from .models import (
     DepositRequest,
     LedgerEntry,
     ManualAdjustment,
+    PendingTransfer,
     Transfer,
     WithdrawalRequest,
 )
@@ -34,7 +39,9 @@ from .serializers import (
     LedgerEntrySerializer,
     ManualAdjustmentCreateSerializer,
     ManualAdjustmentSerializer,
+    TransferConfirmSerializer,
     TransferCreateSerializer,
+    TransferResendSerializer,
     TransferSerializer,
     WithdrawalCreateSerializer,
     WithdrawalSerializer,
@@ -102,7 +109,13 @@ class CardListCreateView(APIView):
         return Response(CardSerializer(card).data, status=status.HTTP_201_CREATED)
 
 
-class TransferCreateView(APIView):
+class TransferInitiateView(APIView):
+    """Step 1: validate the form and email an OTP. Deliberately creates no
+    Transfer/LedgerEntry rows and moves no money — those only get created by
+    TransferConfirmView, once the code is verified. So if OTP delivery fails
+    or the user abandons the flow, nothing has touched a balance; there is
+    no "stuck mid-transfer" state to worry about."""
+
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "transfer"
 
@@ -119,23 +132,98 @@ class TransferCreateView(APIView):
 
         amount = data["amount_cents"]
 
-        to_account_id = Account.objects.filter(
-            account_number=data["to_account"]
-        ).values_list("id", flat=True).first()
-        if to_account_id is None:
+        to_account = Account.objects.filter(account_number=data["to_account"]).first()
+        if to_account is None:
             return Response({"error": "Destination account number not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        from_account = Account.objects.filter(id=data["from_account"], owner=request.user).first()
+        if from_account is None:
+            return Response({"error": "Source account not found."}, status=status.HTTP_404_NOT_FOUND)
+        if from_account.id == to_account.id:
+            return Response({"error": "Cannot transfer to the same account."}, status=status.HTTP_400_BAD_REQUEST)
+        if from_account.status != AccountStatus.ACTIVE:
+            return Response({"error": "Source account is not active."}, status=status.HTTP_400_BAD_REQUEST)
+        if to_account.status != AccountStatus.ACTIVE:
+            return Response({"error": "Destination account is not active."}, status=status.HTTP_400_BAD_REQUEST)
+        if from_account.balance_cents() < amount:
+            return Response({"error": "Insufficient funds."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # This is only a pre-check for immediate UX feedback. Everything
+        # above is re-validated under lock in TransferConfirmView, since
+        # minutes may pass before the OTP is entered and balances/status
+        # can change in that window.
+        pending = PendingTransfer.objects.create(
+            user=request.user,
+            from_account=from_account,
+            to_account=to_account,
+            amount_cents=amount,
+            note=data.get("note", ""),
+        )
+
+        device, _ = EmailDevice.objects.get_or_create(
+            user=request.user, name=f"transfer:{pending.id}", defaults={"confirmed": True}
+        )
+        try:
+            send_email_otp_challenge(device)
+        except Exception:
+            pending.delete()
+            return Response(
+                {"error": "We couldn't send your verification code. Please try again."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return Response(
+            {
+                "transfer_intent_id": pending.id,
+                "message": "Enter the 6-digit code sent to your email. It expires in 10 minutes.",
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class TransferConfirmView(APIView):
+    """Step 2: verify the emailed code, then re-validate and execute the
+    transfer under lock — this is the only place a Transfer/LedgerEntry row
+    or a balance change is ever created for a transfer."""
+
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "otp"
+
+    def post(self, request):
+        serializer = TransferConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        pending = PendingTransfer.objects.filter(
+            id=data["transfer_intent_id"],
+            user=request.user,
+            created_at__gte=timezone.now() - timedelta(minutes=15),
+        ).first()
+        if pending is None:
+            return Response({"error": "This transfer request was not found or has expired."}, status=status.HTTP_404_NOT_FOUND)
+
+        device = EmailDevice.objects.filter(
+            user=request.user, name=f"transfer:{pending.id}", confirmed=True
+        ).first()
+        if not device or not device.verify_token(data["code"]):
+            return Response({"error": "Incorrect or expired code."}, status=status.HTTP_400_BAD_REQUEST)
+
+        amount = pending.amount_cents
 
         with transaction.atomic():
             # Lock both rows for the duration of the transfer so a concurrent
             # transfer can't read a stale balance; ordering by id keeps two
             # transfers between the same pair of accounts from deadlocking.
             locked = Account.objects.select_for_update().filter(
-                id__in=[data["from_account"], to_account_id]
+                id__in=[pending.from_account_id, pending.to_account_id]
             ).order_by("id")
             accounts_by_id = {a.id: a for a in locked}
-            from_account = accounts_by_id.get(data["from_account"])
-            to_account = accounts_by_id.get(to_account_id)
+            from_account = accounts_by_id.get(pending.from_account_id)
+            to_account = accounts_by_id.get(pending.to_account_id)
 
+            # Re-check everything rather than trusting the initiate-time
+            # snapshot: time has passed waiting on the OTP, and balances or
+            # account status may have changed in the meantime.
             if from_account is None or from_account.owner_id != request.user.id:
                 return Response({"error": "Source account not found."}, status=status.HTTP_404_NOT_FOUND)
             if to_account is None:
@@ -153,7 +241,7 @@ class TransferCreateView(APIView):
                 from_account=from_account,
                 to_account=to_account,
                 amount_cents=amount,
-                note=data.get("note", ""),
+                note=pending.note,
                 status=Transfer.Status.POSTED,
             )
             LedgerEntry.objects.create(
@@ -185,7 +273,40 @@ class TransferCreateView(APIView):
                 body=f"Received into {to_account.name} from account •••• {from_account.account_number[-4:]}",
             )
 
+            pending.delete()
+
         return Response(TransferSerializer(transfer).data, status=status.HTTP_201_CREATED)
+
+
+class TransferResendOtpView(APIView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "otp"
+
+    def post(self, request):
+        serializer = TransferResendSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        pending = PendingTransfer.objects.filter(
+            id=serializer.validated_data["transfer_intent_id"],
+            user=request.user,
+            created_at__gte=timezone.now() - timedelta(minutes=15),
+        ).first()
+        if pending is None:
+            return Response({"error": "This transfer request was not found or has expired."}, status=status.HTTP_404_NOT_FOUND)
+
+        device = EmailDevice.objects.filter(
+            user=request.user, name=f"transfer:{pending.id}", confirmed=True
+        ).first()
+        if device:
+            try:
+                send_email_otp_challenge(device)
+            except Exception:
+                return Response(
+                    {"error": "We couldn't send your verification code. Please try again."},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+
+        return Response({"message": "A new code has been sent."})
 
 
 class DepositListCreateView(APIView):

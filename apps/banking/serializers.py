@@ -44,6 +44,15 @@ class TransferCreateSerializer(serializers.Serializer):
     note = serializers.CharField(required=False, allow_blank=True, max_length=255)
 
 
+class TransferConfirmSerializer(serializers.Serializer):
+    transfer_intent_id = serializers.UUIDField()
+    code = serializers.CharField(max_length=6)
+
+
+class TransferResendSerializer(serializers.Serializer):
+    transfer_intent_id = serializers.UUIDField()
+
+
 class TransferSerializer(serializers.ModelSerializer):
     class Meta:
         model = Transfer

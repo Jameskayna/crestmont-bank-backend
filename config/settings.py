@@ -23,6 +23,7 @@ INSTALLED_APPS = [
     "django_filters",
     "django_otp",
     "django_otp.plugins.otp_totp",
+    "django_otp.plugins.otp_email",
     "anymail",
 
     # domain apps
@@ -164,6 +165,19 @@ FRONTEND_URL = config("FRONTEND_URL")
 # Label shown in authenticator apps (Google Authenticator, Authy, etc.)
 # next to the account when a user scans the 2FA QR code.
 OTP_TOTP_ISSUER = "Crestmont Reserve Bank"
+
+# Mandatory email OTP (login + transfers). Delivery reuses EmailDevice's
+# built-in django.core.mail.send_mail wrapper, so it goes through the same
+# Zoho SMTP backend configured above with no extra plumbing.
+OTP_EMAIL_SENDER = DEFAULT_FROM_EMAIL
+OTP_EMAIL_SUBJECT = "Your Crestmont Reserve Bank verification code"
+OTP_EMAIL_TOKEN_VALIDITY = 600  # 10 minutes
+OTP_EMAIL_BODY_TEMPLATE = (
+    "Hi,\n\n"
+    "Your Crestmont Reserve Bank verification code is: {{ token }}\n\n"
+    "This code expires in 10 minutes and can only be used once. "
+    "If you didn't request this code, you can safely ignore this email."
+)
 
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"

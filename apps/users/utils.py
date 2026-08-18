@@ -7,6 +7,25 @@ from django.core.mail import send_mail
 from django.utils import timezone
 
 
+def send_email_otp_challenge(device):
+    """Generate and email an OTP for a django_otp EmailDevice.
+
+    EmailDevice.generate_challenge() persists the new token (and starts its
+    resend cooldown) *before* it sends the email. If the send then raises,
+    the device is left holding a code the user never received, plus a live
+    cooldown that would block them from getting a working one for another
+    60s. Since that's entirely our failure, not theirs, we undo both here
+    so the very next attempt isn't punished by a code they never saw.
+    """
+    try:
+        device.generate_challenge()
+    except Exception:
+        device.token = None
+        device.cooldown_reset(commit=False)
+        device.save()
+        raise
+
+
 def generate_raw_token():
     """A high-entropy token that's only ever transmitted via email, never stored raw."""
     return secrets.token_urlsafe(32)
