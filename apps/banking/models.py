@@ -104,18 +104,38 @@ class LedgerEntry(models.Model):
         ]
 
 
+class TransferType(models.TextChoices):
+    DOMESTIC = "domestic", "Domestic"
+    INTERNATIONAL = "international", "International"
+
+
+# Fields below shared by Transfer and PendingTransfer: bank_name is stored
+# for both types but only ever used for routing on neither — this app has
+# no real ACH/SWIFT integration, so "domestic" still just means "the other
+# account already exists on this platform" (to_account resolves it) and
+# "international" means the money leaves the ledger to an external
+# recipient recorded here, not an actual outbound wire.
 class Transfer(models.Model):
-    """Internal transfer between two accounts on the platform."""
+    """A domestic (internal, to_account set) or international (external
+    recipient, to_account null) transfer."""
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
         POSTED = "posted", "Posted"
         FAILED = "failed", "Failed"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    transfer_type = models.CharField(max_length=20, choices=TransferType.choices, default=TransferType.DOMESTIC)
     from_account = models.ForeignKey(Account, on_delete=models.PROTECT, related_name="outgoing_transfers")
-    to_account = models.ForeignKey(Account, on_delete=models.PROTECT, related_name="incoming_transfers")
+    to_account = models.ForeignKey(
+        Account, on_delete=models.PROTECT, related_name="incoming_transfers", null=True, blank=True
+    )
     amount_cents = models.BigIntegerField()
     note = models.CharField(max_length=255, blank=True)
+    bank_name = models.CharField(max_length=120, blank=True)
+    recipient_name = models.CharField(max_length=120, blank=True)
+    destination_country = models.CharField(max_length=2, blank=True)  # ISO 3166-1 alpha-2
+    swift_bic = models.CharField(max_length=11, blank=True)
+    iban = models.CharField(max_length=34, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -130,10 +150,16 @@ class PendingTransfer(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="pending_transfers")
+    transfer_type = models.CharField(max_length=20, choices=TransferType.choices, default=TransferType.DOMESTIC)
     from_account = models.ForeignKey(Account, on_delete=models.CASCADE, related_name="+")
-    to_account = models.ForeignKey(Account, on_delete=models.CASCADE, related_name="+")
+    to_account = models.ForeignKey(Account, on_delete=models.CASCADE, related_name="+", null=True, blank=True)
     amount_cents = models.BigIntegerField()
     note = models.CharField(max_length=255, blank=True)
+    bank_name = models.CharField(max_length=120, blank=True)
+    recipient_name = models.CharField(max_length=120, blank=True)
+    destination_country = models.CharField(max_length=2, blank=True)
+    swift_bic = models.CharField(max_length=11, blank=True)
+    iban = models.CharField(max_length=34, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
 

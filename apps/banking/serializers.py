@@ -1,9 +1,13 @@
+import re
 from datetime import timedelta
 
 from django.utils import timezone
 from rest_framework import serializers
 
-from .models import Account, Card, DepositRequest, LedgerEntry, ManualAdjustment, Transfer, WithdrawalRequest
+from .models import Account, Card, DepositRequest, LedgerEntry, ManualAdjustment, Transfer, TransferType, WithdrawalRequest
+
+SWIFT_BIC_RE = re.compile(r"^[A-Za-z0-9]{8}([A-Za-z0-9]{3})?$")
+IBAN_RE = re.compile(r"^[A-Za-z]{2}\d{2}[A-Za-z0-9]{1,30}$")
 
 
 class AccountSerializer(serializers.ModelSerializer):
@@ -38,10 +42,51 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
 
 
 class TransferCreateSerializer(serializers.Serializer):
+    transfer_type = serializers.ChoiceField(choices=TransferType.choices, default=TransferType.DOMESTIC)
     from_account = serializers.UUIDField()
-    to_account = serializers.CharField(max_length=17)
     amount_cents = serializers.IntegerField(min_value=1)
     note = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+    # Domestic
+    to_account = serializers.CharField(required=False, allow_blank=True, max_length=17)
+    bank_name = serializers.CharField(required=False, allow_blank=True, max_length=120)
+
+    # International
+    recipient_name = serializers.CharField(required=False, allow_blank=True, max_length=120)
+    destination_country = serializers.CharField(required=False, allow_blank=True, max_length=2)
+    swift_bic = serializers.CharField(required=False, allow_blank=True, max_length=11)
+    iban = serializers.CharField(required=False, allow_blank=True, max_length=34)
+
+    def validate_swift_bic(self, value):
+        if value and not SWIFT_BIC_RE.match(value):
+            raise serializers.ValidationError("Enter a valid 8 or 11-character SWIFT/BIC code.")
+        return value.upper()
+
+    def validate_iban(self, value):
+        if value and not IBAN_RE.match(value.replace(" ", "")):
+            raise serializers.ValidationError(
+                "Enter a valid IBAN (starts with a 2-letter country code and 2 digits)."
+            )
+        return value.upper().replace(" ", "")
+
+    def validate_destination_country(self, value):
+        return value.upper()
+
+    def validate(self, attrs):
+        if attrs["transfer_type"] == TransferType.DOMESTIC:
+            required = {"to_account": "Destination account number", "bank_name": "Bank name"}
+        else:
+            required = {
+                "recipient_name": "Recipient name",
+                "destination_country": "Destination country",
+                "bank_name": "Bank name",
+                "swift_bic": "SWIFT/BIC code",
+                "iban": "IBAN",
+            }
+        errors = {field: f"{label} is required." for field, label in required.items() if not attrs.get(field)}
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
 
 
 class TransferConfirmSerializer(serializers.Serializer):
@@ -56,7 +101,11 @@ class TransferResendSerializer(serializers.Serializer):
 class TransferSerializer(serializers.ModelSerializer):
     class Meta:
         model = Transfer
-        fields = ["id", "from_account", "to_account", "amount_cents", "note", "status", "created_at"]
+        fields = [
+            "id", "transfer_type", "from_account", "to_account", "amount_cents", "note",
+            "bank_name", "recipient_name", "destination_country", "swift_bic", "iban",
+            "status", "created_at",
+        ]
         read_only_fields = fields
 
 

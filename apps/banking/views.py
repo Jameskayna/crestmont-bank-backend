@@ -25,6 +25,7 @@ from .models import (
     ManualAdjustment,
     PendingTransfer,
     Transfer,
+    TransferType,
     WithdrawalRequest,
 )
 from .serializers import (
@@ -131,19 +132,22 @@ class TransferInitiateView(APIView):
             )
 
         amount = data["amount_cents"]
+        is_domestic = data["transfer_type"] == TransferType.DOMESTIC
 
-        to_account = Account.objects.filter(account_number=data["to_account"]).first()
-        if to_account is None:
-            return Response({"error": "Destination account number not found."}, status=status.HTTP_404_NOT_FOUND)
+        to_account = None
+        if is_domestic:
+            to_account = Account.objects.filter(account_number=data["to_account"]).first()
+            if to_account is None:
+                return Response({"error": "Destination account number not found."}, status=status.HTTP_404_NOT_FOUND)
 
         from_account = Account.objects.filter(id=data["from_account"], owner=request.user).first()
         if from_account is None:
             return Response({"error": "Source account not found."}, status=status.HTTP_404_NOT_FOUND)
-        if from_account.id == to_account.id:
+        if is_domestic and from_account.id == to_account.id:
             return Response({"error": "Cannot transfer to the same account."}, status=status.HTTP_400_BAD_REQUEST)
         if from_account.status != AccountStatus.ACTIVE:
             return Response({"error": "Source account is not active."}, status=status.HTTP_400_BAD_REQUEST)
-        if to_account.status != AccountStatus.ACTIVE:
+        if is_domestic and to_account.status != AccountStatus.ACTIVE:
             return Response({"error": "Destination account is not active."}, status=status.HTTP_400_BAD_REQUEST)
         if from_account.balance_cents() < amount:
             return Response({"error": "Insufficient funds."}, status=status.HTTP_400_BAD_REQUEST)
@@ -154,10 +158,16 @@ class TransferInitiateView(APIView):
         # can change in that window.
         pending = PendingTransfer.objects.create(
             user=request.user,
+            transfer_type=data["transfer_type"],
             from_account=from_account,
             to_account=to_account,
             amount_cents=amount,
             note=data.get("note", ""),
+            bank_name=data.get("bank_name", ""),
+            recipient_name=data.get("recipient_name", ""),
+            destination_country=data.get("destination_country", ""),
+            swift_bic=data.get("swift_bic", ""),
+            iban=data.get("iban", ""),
         )
 
         device, _ = EmailDevice.objects.get_or_create(
@@ -209,69 +219,100 @@ class TransferConfirmView(APIView):
             return Response({"error": "Incorrect or expired code."}, status=status.HTTP_400_BAD_REQUEST)
 
         amount = pending.amount_cents
+        is_domestic = pending.transfer_type == TransferType.DOMESTIC
 
         with transaction.atomic():
-            # Lock both rows for the duration of the transfer so a concurrent
-            # transfer can't read a stale balance; ordering by id keeps two
-            # transfers between the same pair of accounts from deadlocking.
-            locked = Account.objects.select_for_update().filter(
-                id__in=[pending.from_account_id, pending.to_account_id]
-            ).order_by("id")
+            # Lock the account row(s) for the duration of the transfer so a
+            # concurrent transfer can't read a stale balance; ordering by id
+            # keeps two transfers between the same pair of accounts from
+            # deadlocking. International has no to_account to lock.
+            lock_ids = [pending.from_account_id] + ([pending.to_account_id] if is_domestic else [])
+            locked = Account.objects.select_for_update().filter(id__in=lock_ids).order_by("id")
             accounts_by_id = {a.id: a for a in locked}
             from_account = accounts_by_id.get(pending.from_account_id)
-            to_account = accounts_by_id.get(pending.to_account_id)
+            to_account = accounts_by_id.get(pending.to_account_id) if is_domestic else None
 
             # Re-check everything rather than trusting the initiate-time
             # snapshot: time has passed waiting on the OTP, and balances or
             # account status may have changed in the meantime.
             if from_account is None or from_account.owner_id != request.user.id:
                 return Response({"error": "Source account not found."}, status=status.HTTP_404_NOT_FOUND)
-            if to_account is None:
-                return Response({"error": "Destination account number not found."}, status=status.HTTP_404_NOT_FOUND)
-            if from_account.id == to_account.id:
-                return Response({"error": "Cannot transfer to the same account."}, status=status.HTTP_400_BAD_REQUEST)
+            if is_domestic:
+                if to_account is None:
+                    return Response({"error": "Destination account number not found."}, status=status.HTTP_404_NOT_FOUND)
+                if from_account.id == to_account.id:
+                    return Response({"error": "Cannot transfer to the same account."}, status=status.HTTP_400_BAD_REQUEST)
+                if to_account.status != AccountStatus.ACTIVE:
+                    return Response({"error": "Destination account is not active."}, status=status.HTTP_400_BAD_REQUEST)
             if from_account.status != AccountStatus.ACTIVE:
                 return Response({"error": "Source account is not active."}, status=status.HTTP_400_BAD_REQUEST)
-            if to_account.status != AccountStatus.ACTIVE:
-                return Response({"error": "Destination account is not active."}, status=status.HTTP_400_BAD_REQUEST)
             if from_account.balance_cents() < amount:
                 return Response({"error": "Insufficient funds."}, status=status.HTTP_400_BAD_REQUEST)
 
             transfer = Transfer.objects.create(
+                transfer_type=pending.transfer_type,
                 from_account=from_account,
                 to_account=to_account,
                 amount_cents=amount,
                 note=pending.note,
+                bank_name=pending.bank_name,
+                recipient_name=pending.recipient_name,
+                destination_country=pending.destination_country,
+                swift_bic=pending.swift_bic,
+                iban=pending.iban,
                 status=Transfer.Status.POSTED,
             )
-            LedgerEntry.objects.create(
-                account=from_account,
-                amount_cents=-amount,
-                description=f"Transfer to {to_account.account_number}",
-                status=LedgerEntry.Status.POSTED,
-                source_type=LedgerEntry.SourceType.TRANSFER,
-                source_id=transfer.id,
-            )
-            LedgerEntry.objects.create(
-                account=to_account,
-                amount_cents=amount,
-                description=f"Transfer from {from_account.account_number}",
-                status=LedgerEntry.Status.POSTED,
-                source_type=LedgerEntry.SourceType.TRANSFER,
-                source_id=transfer.id,
-            )
-            Notification.objects.create(
-                user=from_account.owner,
-                category=Notification.Category.TRANSACTION,
-                title="Transfer sent",
-                body=f"Sent from {from_account.name} to account •••• {to_account.account_number[-4:]}",
-            )
-            Notification.objects.create(
-                user=to_account.owner,
-                category=Notification.Category.TRANSACTION,
-                title="Transfer received",
-                body=f"Received into {to_account.name} from account •••• {from_account.account_number[-4:]}",
-            )
+
+            if is_domestic:
+                LedgerEntry.objects.create(
+                    account=from_account,
+                    amount_cents=-amount,
+                    description=f"Transfer to {to_account.account_number}",
+                    status=LedgerEntry.Status.POSTED,
+                    source_type=LedgerEntry.SourceType.TRANSFER,
+                    source_id=transfer.id,
+                )
+                LedgerEntry.objects.create(
+                    account=to_account,
+                    amount_cents=amount,
+                    description=f"Transfer from {from_account.account_number}",
+                    status=LedgerEntry.Status.POSTED,
+                    source_type=LedgerEntry.SourceType.TRANSFER,
+                    source_id=transfer.id,
+                )
+                Notification.objects.create(
+                    user=from_account.owner,
+                    category=Notification.Category.TRANSACTION,
+                    title="Transfer sent",
+                    body=f"Sent from {from_account.name} to account •••• {to_account.account_number[-4:]}",
+                )
+                Notification.objects.create(
+                    user=to_account.owner,
+                    category=Notification.Category.TRANSACTION,
+                    title="Transfer received",
+                    body=f"Received into {to_account.name} from account •••• {from_account.account_number[-4:]}",
+                )
+            else:
+                LedgerEntry.objects.create(
+                    account=from_account,
+                    amount_cents=-amount,
+                    description=(
+                        f"International transfer to {pending.recipient_name}, "
+                        f"{pending.bank_name} ({pending.destination_country})"
+                    ),
+                    status=LedgerEntry.Status.POSTED,
+                    source_type=LedgerEntry.SourceType.TRANSFER,
+                    source_id=transfer.id,
+                )
+                Notification.objects.create(
+                    user=from_account.owner,
+                    category=Notification.Category.TRANSACTION,
+                    title="International transfer sent",
+                    body=(
+                        f"Sent from {from_account.name} to {pending.recipient_name} "
+                        f"at {pending.bank_name} ({pending.destination_country})"
+                    ),
+                )
 
             pending.delete()
 
