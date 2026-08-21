@@ -140,7 +140,7 @@ SECURE_HSTS_INCLUDE_SUBDOMAINS = not DEBUG
 X_FRAME_OPTIONS = "DENY"
 
 EMAIL_BACKEND = config("EMAIL_BACKEND")
-DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL")
+DEFAULT_FROM_EMAIL = "CrestmontReserveBank <accountinfo@crestmontreservebank.com>"
 # Zoho Mail via SMTP — Anymail doesn't support Zoho as an ESP, so this
 # bypasses Anymail entirely and uses Django's built-in SMTP backend.
 # These are only read when EMAIL_BACKEND is the smtp backend; the console
